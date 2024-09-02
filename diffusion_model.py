@@ -11,6 +11,10 @@ from torchvision import transforms
 
 
 class DeviceManager():
+    """
+        A special class designed to store information about available devices, 
+        and also has methods that can be overridden to run code on the TPU.
+    """
     def __init__(self, rank, world_size, master_process, device):
         self.rank = rank
         self.world_size = world_size
@@ -38,6 +42,9 @@ class DeviceManager():
 
 
 class TrainParameters():
+    """
+    Class for storing various training hyperparameters.
+    """
     def __init__(self, T):
         self.T = T
 
@@ -112,6 +119,9 @@ def clean_folder(path: str, allows_ex: List[str]):
 
 
 class NoiseScheduler(torch.nn.Module):
+    """
+    Noise generator for the image. It performs a forward pass process on diffuse model.
+    """
     def __init__(self, T: int, device_manager: DeviceManager):
         super().__init__()
         self.T = T
@@ -165,7 +175,6 @@ def run(device_manager: DeviceManager, train_parameters: TrainParameters):
                 image = transforms.ToPILImage()(image)
                 ax.imshow(image)
                 ax.axis('off')
-            
             plt.tight_layout()
             plt.show()
 
