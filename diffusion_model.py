@@ -47,8 +47,10 @@ class TrainParameters():
     """
     Class for storing various training hyperparameters.
     """
-    def __init__(self, T):
+    def __init__(self, T, epochs, show_freq):
         self.T = T
+        self.epochs = epochs
+        self.show_freq = show_freq
 
 
 
@@ -166,7 +168,7 @@ class Block(nn.Module):
         else:
             self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
             self.transform = nn.Conv2d(out_ch, out_ch, 4, 2, 1)
-        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=3)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
         self.bnorm = nn.BatchNorm2d(out_ch)
         self.relu = nn.ReLU()
     
@@ -206,7 +208,7 @@ class SimpleUnet(nn.Module):
         self.time_mlp = nn.Sequential(
             SinusidalPositionEmbeddings(time_emb_dim),
             nn.Linear(time_emb_dim, time_emb_dim),
-            nn.ReLu()
+            nn.ReLU()
         )
 
         # Initial projection
@@ -232,30 +234,79 @@ class SimpleUnet(nn.Module):
             x = torch.cat((x, residual_x), dim=1)
             x = up(x, t)
         return self.output(x)
+    
+    @torch.no_grad()
+    def sample_timestep(self, x, t, noise_scheduler: NoiseScheduler):
+        betas_t = noise_scheduler.get_index_from_list(noise_scheduler.betas, t, x.shape)
+        sqrt_one_minus_alphas_cumprod_t = noise_scheduler.get_index_from_list(noise_scheduler.sqrt_one_minus_alphas_cumprod, t, x.shape)
+        sqrt_recip_alphas_t = noise_scheduler.get_index_from_list(noise_scheduler.sqrt_recip_alphas, t, x.shape)
+
+        model_mean = sqrt_recip_alphas_t * (x - betas_t * self(x, t) / sqrt_one_minus_alphas_cumprod_t)
+        posterior_variance_t = noise_scheduler.get_index_from_list(noise_scheduler.posterior_variance, t, x.shape)
+
+        if t == 0:
+            return model_mean
+        else:
+            noise = torch.rand_like(x)
+            return model_mean + torch.sqrt(posterior_variance_t) * noise
+
+@torch.no_grad()
+def show_samples(model: SimpleUnet, count_samples: int, image_size: int, device_manager: DeviceManager, noise_scheduler: NoiseScheduler):
+    image = torch.randn((1, 3, image_size, image_size), device=device_manager.device)
+
+    fig, axes = plt.subplots(1, count_samples, figsize=(8, 8))
+    axes = axes.flatten()
+    
+    steps_to_show = noise_scheduler.T // count_samples
+
+    for i in range(0, noise_scheduler.T)[::-1]:
+        t = torch.tensor([i], device=device_manager.device, dtype=torch.long)
+        image = model.sample_timestep(image, t, noise_scheduler)
+        if i % steps_to_show == 0:
+            pil_image = transforms.ToPILImage()(image[0].cpu())
+            ax = axes[i // steps_to_show]
+            ax.imshow(pil_image)
+            ax.axis('off')
+    
+    plt.tight_layout()
+    plt.show()
+
+
+def train_loop(epochs: int, show_freq: int, model: SimpleUnet, optimizer, noise_scheduler: NoiseScheduler, train_dataset: CatDataset):
+    total_iteration = 0
+    for epoch in range(epochs):
+        for step, batch in enumerate(train_dataset):
+            device_manager.mark_step()
+            batch = batch.to(device_manager.device)
+            optimizer.zero_grad()
+
+            t = torch.randint(0, noise_scheduler.T, (train_dataset.batch_size, ), device=device_manager.device, dtype=torch.long)
+            x_noisy, noise = noise_scheduler(batch, t)
+            noise_pred = model(x_noisy, t)
+            loss = F.l1_loss(noise, noise_pred)
+
+            loss.backward()
+            device_manager.optimizer_step(optimizer) # mark_step is already in use
+            
+            device_manager.master_print(f"total_iteration {total_iteration}, epoch {epoch}, step {step} | loss {loss.item()}")
+            if total_iteration % show_freq == 0:
+                if device_manager.master_process:
+                    show_samples(model, 10, batch.shape[-1], device_manager, noise_scheduler)
+                device_manager.rendezvous("show_samples")
+
+            total_iteration += 1
+
 
 def run(device_manager: DeviceManager, train_parameters: TrainParameters):
     noise_scheduler = NoiseScheduler(train_parameters.T, device_manager)
 
-    train_dataset = CatDataset(path=r"data\images", shard_size=1024, batch_size=16, target_image_size=(100, 100), rank=0, world_size=1)
-    train_iterator = iter(train_dataset)
+    train_dataset = CatDataset(path=r"data\images", shard_size=1024, batch_size=16, target_image_size=(64, 64), rank=0, world_size=1)
+    
+    model = SimpleUnet()
+    model.to(device_manager.device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-    count_x = 5
-    count_y = 5
-    count_noises = count_x * count_y
-    for x in train_iterator:
-        x = x.to(device_manager.device)
-        t = torch.linspace(0, train_parameters.T - 1, count_noises, dtype=torch.int64, device=device_manager.device).repeat(x.shape[0])
-        x = noise_scheduler(x.unsqueeze(1).repeat(1, count_noises, 1, 1, 1).view(-1, *x.shape[-3:]), t)[0].view(-1, count_noises, *x.shape[-3:])
-        x = x.to('cpu')
-        for noises in x:
-            fig, axes = plt.subplots(count_y, count_x, figsize=(8, 8))
-            axes = axes.flatten()
-            for ax, image in zip(axes, noises):
-                image = transforms.ToPILImage()(image)
-                ax.imshow(image)
-                ax.axis('off')
-            plt.tight_layout()
-            plt.show()
+    train_loop(train_parameters.epochs, train_parameters.show_freq, model, optimizer, noise_scheduler, train_dataset)
 
 
 if __name__ == "__main__":
@@ -271,9 +322,11 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     count_timesteps = 200
+    epochs = 5
+    show_freq = 3000
 
     device_manager = DeviceManager(rank, world_size, master_process, device)
-    train_parameters = TrainParameters(count_timesteps)
+    train_parameters = TrainParameters(count_timesteps, epochs, show_freq)
     
     run(device_manager, train_parameters)
     
