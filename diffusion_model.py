@@ -41,40 +41,78 @@ class DeviceManager():
     
     def save(self, checkpoint, filename):
         torch.save(checkpoint, filename)
-
+    
 
 class TrainParameters():
     """
     Class for storing various training hyperparameters.
     """
-    def __init__(self, T, epochs, show_freq):
+    def __init__(self, T, epochs, show_freq, dataset_path, shard_size, batch_size, target_image_size):
         self.T = T
         self.epochs = epochs
         self.show_freq = show_freq
+        self.dataset_path = dataset_path
+        self.shard_size = shard_size
+        self.batch_size = batch_size
+        self.target_image_size = target_image_size
 
+        
+class LearningRateScheduler():
+    def __init__(self, min_lr, max_lr, warmup_steps_portion):
+        self.min_lr = min_lr
+        self.max_lr = max_lr
+        self.warmup_steps_portion = warmup_steps_portion
+    
+    def init(self, train_parameters: TrainParameters, dataset_len):
+        count_steps_in_epoch = dataset_len // train_parameters.batch_size
+        self.max_steps = count_steps_in_epoch * train_parameters.epochs
+        self.warmup_steps = int(self.max_steps * self.warmup_steps_portion)
+    
+    def get_lr(self, total_iteration):
+        # 1) linear warmup for warmup_iters steps
+        if total_iteration < self.warmup_steps:
+            return self.max_lr * (total_iteration + 1) / self.warmup_steps
+        # 2) if it > lr_decay_iters, return min_lerning_rate
+        if total_iteration > self.max_steps:
+            return self.min_lr
+        # 3) in between, use cosine decay down to min learning rate
+        decay_ratio = (total_iteration - self.warmup_steps) / (self.max_steps - self.warmup_steps)
+        assert 0 <= decay_ratio <= 1
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
+        return self.min_lr + coeff * (self.max_lr - self.min_lr)
 
 
 class CatDataset(IterableDataset):
     def __init__(self, path: str, shard_size: int, batch_size: int, target_image_size: tuple, 
-                 rank: int, world_size: int, shuffle: bool = False, allows_ex: List[str] = [".jpg", ".png", ".JPEG"]):
-        self.shard_size = shard_size
+                 rank: int, world_size: int, full_in_RAM:bool = False, shuffle: bool = False, allows_ex: List[str] = [".jpg", ".png", ".JPEG"]):
+        self.full_in_RAM = full_in_RAM
         self.batch_size = batch_size
         self.rank = rank
         self.world_size = world_size
 
         self.image_paths = [os.path.join(path, name) for name in os.listdir(path) if os.path.splitext(name)[1] in allows_ex]
+        self.image_paths = self.image_paths[:1]
 
         self.count_images = len(self.image_paths)
+        self.shard_size = self.count_images if full_in_RAM else shard_size
         self.count_shards = self.count_images // shard_size
 
         self.transform = transforms.Compose([
             transforms.Resize(target_image_size),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.0, 0.0, 0.0], std=[1.0, 1.0, 1.0])
+            transforms.Lambda(lambda x: x * 2 - 1)
+        ])
+
+        self.reverse_transform = transforms.Compose([
+            transforms.Lambda(lambda x: (x + 1) / 2),
+            transforms.ToPILImage()
         ])
 
         if shuffle:
             np.random.shuffle(self.image_paths)
+        
+        if self.full_in_RAM:
+            self.shard = self.get_shard(0)
 
 
     def get_shard(self, shard_n) -> torch.Tensor:
@@ -99,7 +137,7 @@ class CatDataset(IterableDataset):
 
     def __iter__(self):
         for shard_id in range(self.count_shards):
-            shard_images = self.get_shard(shard_id)
+            shard_images = self.shard if self.full_in_RAM else self.get_shard(shard_id)
             image_id = self.rank * self.batch_size
             while image_id + self.batch_size <= self.shard_size:
                 images_batch = shard_images[image_id:image_id + self.batch_size]
@@ -109,7 +147,6 @@ class CatDataset(IterableDataset):
 
     def __len__(self) -> int:
         return self.count_images
-
 
 def clean_folder(path: str, allows_ex: List[str]):
     """
@@ -152,7 +189,7 @@ class NoiseScheduler(torch.nn.Module):
 
 
     def forward(self, x_0, t) -> tuple[torch.Tensor, torch.Tensor]:
-        noise = torch.rand_like(x_0, device=self.device_manager.device)
+        noise = torch.randn_like(x_0, device=self.device_manager.device)
         sqrt_alphas_cumprod_t = self.get_index_from_list(self.sqrt_alphas_cumprod, t, x_0.shape)
         sqrt_one_minus_alphas_cumprod_t = self.get_index_from_list(self.sqrt_one_minus_alphas_cumprod, t, x_0.shape)
         return sqrt_alphas_cumprod_t * x_0 + sqrt_one_minus_alphas_cumprod_t * noise, noise
@@ -244,26 +281,29 @@ class SimpleUnet(nn.Module):
         model_mean = sqrt_recip_alphas_t * (x - betas_t * self(x, t) / sqrt_one_minus_alphas_cumprod_t)
         posterior_variance_t = noise_scheduler.get_index_from_list(noise_scheduler.posterior_variance, t, x.shape)
 
-        if t == 0:
+        if t.item() == 0:
             return model_mean
         else:
-            noise = torch.rand_like(x)
+            noise = torch.randn_like(x)
             return model_mean + torch.sqrt(posterior_variance_t) * noise
 
 @torch.no_grad()
-def show_samples(model: SimpleUnet, count_samples: int, image_size: int, device_manager: DeviceManager, noise_scheduler: NoiseScheduler):
+def show_samples(model: SimpleUnet, count_samples: int, image_size: int, device_manager: DeviceManager, noise_scheduler: NoiseScheduler, train_dataset: CatDataset):
     image = torch.randn((1, 3, image_size, image_size), device=device_manager.device)
 
-    fig, axes = plt.subplots(1, count_samples, figsize=(8, 8))
+    fig, axes = plt.subplots(1, count_samples, figsize=(12, 12))
     axes = axes.flatten()
     
     steps_to_show = noise_scheduler.T // count_samples
 
     for i in range(0, noise_scheduler.T)[::-1]:
+        device_manager.mark_step()
         t = torch.tensor([i], device=device_manager.device, dtype=torch.long)
         image = model.sample_timestep(image, t, noise_scheduler)
+        image = torch.clamp(image, -1.0, 1.0)
+        device_manager.mark_step()
         if i % steps_to_show == 0:
-            pil_image = transforms.ToPILImage()(image[0].cpu())
+            pil_image = train_dataset.reverse_transform(image[0].cpu())
             ax = axes[i // steps_to_show]
             ax.imshow(pil_image)
             ax.axis('off')
@@ -272,7 +312,8 @@ def show_samples(model: SimpleUnet, count_samples: int, image_size: int, device_
     plt.show()
 
 
-def train_loop(epochs: int, show_freq: int, model: SimpleUnet, optimizer, noise_scheduler: NoiseScheduler, train_dataset: CatDataset):
+def train_loop(epochs: int, show_freq: int, model: SimpleUnet, optimizer, noise_scheduler: NoiseScheduler, 
+               train_dataset: CatDataset, device_manager: DeviceManager, learning_rate_scheduler: LearningRateScheduler):
     total_iteration = 0
     for epoch in range(epochs):
         for step, batch in enumerate(train_dataset):
@@ -282,31 +323,39 @@ def train_loop(epochs: int, show_freq: int, model: SimpleUnet, optimizer, noise_
 
             t = torch.randint(0, noise_scheduler.T, (train_dataset.batch_size, ), device=device_manager.device, dtype=torch.long)
             x_noisy, noise = noise_scheduler(batch, t)
+
             noise_pred = model(x_noisy, t)
             loss = F.l1_loss(noise, noise_pred)
 
             loss.backward()
             device_manager.optimizer_step(optimizer) # mark_step is already in use
             
-            device_manager.master_print(f"total_iteration {total_iteration}, epoch {epoch}, step {step} | loss {loss.item()}")
+            learning_rate = learning_rate_scheduler.get_lr(total_iteration)
+            for param_group in optimizer.param_groups:
+                    param_group['lr'] = learning_rate
+            
+            device_manager.master_print(f"total_iteration {total_iteration}, epoch {epoch}, step {step} | loss {loss.item()} | lr: {learning_rate:.4e}")
             if total_iteration % show_freq == 0:
                 if device_manager.master_process:
-                    show_samples(model, 10, batch.shape[-1], device_manager, noise_scheduler)
+                    show_samples(model, 10, batch.shape[-1], device_manager, noise_scheduler, train_dataset)
                 device_manager.rendezvous("show_samples")
 
             total_iteration += 1
 
 
-def run(device_manager: DeviceManager, train_parameters: TrainParameters):
+def run(device_manager: DeviceManager, train_parameters: TrainParameters, learning_rate_scheduler: LearningRateScheduler):
     noise_scheduler = NoiseScheduler(train_parameters.T, device_manager)
 
-    train_dataset = CatDataset(path=r"data\images", shard_size=1024, batch_size=16, target_image_size=(64, 64), rank=0, world_size=1)
+    train_dataset = CatDataset(train_parameters.dataset_path, train_parameters.shard_size, train_parameters.batch_size, 
+                               (train_parameters.target_image_size,)*2, device_manager.rank, device_manager.world_size, full_in_RAM=True)
     
     model = SimpleUnet()
     model.to(device_manager.device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate_scheduler.min_lr)
+    
+    learning_rate_scheduler.init(train_parameters, len(train_dataset))
 
-    train_loop(train_parameters.epochs, train_parameters.show_freq, model, optimizer, noise_scheduler, train_dataset)
+    train_loop(train_parameters.epochs, train_parameters.show_freq, model, optimizer, noise_scheduler, train_dataset, device_manager, learning_rate_scheduler)
 
 
 if __name__ == "__main__":
@@ -321,12 +370,23 @@ if __name__ == "__main__":
     master_process = True
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    count_timesteps = 200
-    epochs = 5
-    show_freq = 3000
-
-    device_manager = DeviceManager(rank, world_size, master_process, device)
-    train_parameters = TrainParameters(count_timesteps, epochs, show_freq)
+    count_timesteps = 300
+    epochs = 100000
+    show_freq = 100
     
-    run(device_manager, train_parameters)
+    dataset_path = r"data\images"
+    shard_size = 1
+    batch_size = 1
+    target_image_size = 64
+    
+    min_learning_rate = 1e-3
+    max_learning_rate = 1e-3
+    #warmup_steps_portion = 0.0375
+    warmup_steps_portion = 0.0
+    
+    device_manager = DeviceManager(rank, world_size, master_process, device)
+    train_parameters = TrainParameters(count_timesteps, epochs, show_freq, dataset_path, shard_size, batch_size, target_image_size)
+    learning_rate_scheduler = LearningRateScheduler(min_learning_rate, max_learning_rate, warmup_steps_portion)
+    
+    run(device_manager, train_parameters, learning_rate_scheduler)
     
