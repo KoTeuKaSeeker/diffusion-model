@@ -93,7 +93,7 @@ class CatDataset(IterableDataset):
         self.world_size = world_size
 
         self.image_paths = [os.path.join(path, name) for name in os.listdir(path) if os.path.splitext(name)[1] in allows_ex]
-        self.image_paths = self.image_paths[:1]
+        # self.image_paths = self.image_paths[:1]
 
         self.count_images = len(self.image_paths)
         self.shard_size = self.count_images if full_in_RAM else shard_size
@@ -404,8 +404,8 @@ if __name__ == "__main__":
     
     dataset_path = r"data\images"
     shard_size = 1
-    batch_size = 1
-    target_image_size = 64
+    batch_size = 4
+    target_image_size = 32
     
     min_learning_rate = 1e-3
     max_learning_rate = 1e-3
