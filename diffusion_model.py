@@ -335,6 +335,11 @@ class SimpleUnet(nn.Module):
 
         self.output = nn.Conv2d(up_channels[-1], out_dim, 1)
 
+        self.reverse_transform = transforms.Compose([
+            transforms.Lambda(lambda x: (x + 1) / 2),
+            transforms.ToPILImage()
+        ])
+
     def forward(self, x, timestep):
         t = self.time_mlp(timestep)
         x = self.conv0(x)
