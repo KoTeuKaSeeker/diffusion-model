@@ -7,7 +7,7 @@
 ![Static Badge](https://img.shields.io/badge/TPU-%2325A162?style=for-the-badge&logo=turbo&logoColor=white)
 ![Static Badge](https://img.shields.io/badge/Git-%23EA330E?style=for-the-badge&logo=git&logoColor=white)
 
-The project is a diffusion model written in [PyTorch](https://pytorch.org/) that can generate random images of cats. The model was written from scratch. Training took place on a dataset containing 9,971 images of cats of various sizes, each of which was then scaled to the required resolution. 
+The project is a diffusion model written in [PyTorch](https://pytorch.org/) that can generate random images of cats. The model was written from scratch. Training took place on a [dataset](https://www.kaggle.com/datasets/danildolgov/cat-dataset/data) containing 9,971 images of cats of various sizes, each of which was then scaled to the required resolution. 
 All training was done on the [Kaggle](https://www.kaggle.com/) platform using the TPU accelerator. The training code is contained [here](https://www.kaggle.com/code/danildolgov/diffusion-model).
 
 The trained model is also available on [Kaggle](https://www.kaggle.com/):
@@ -15,7 +15,7 @@ The trained model is also available on [Kaggle](https://www.kaggle.com/):
 2. Cat-diffusion | size 128x128 | epochs ? (coming soon...)
 
 # Running
-To generate cat images using the cat-diffusion model, you need to download the [git project](https://github.com/KoTeuKaSeeker/diffusion-model/archive/refs/heads/master.zip) and run the <b>inference.ipynb</b> notebook.
+To generate cat images using the cat-diffusion model, you need to download the [git project](https://github.com/KoTeuKaSeeker/diffusion-model/archive/refs/heads/master.zip) and run the <b>inference.ipynb</b> notebook. If the model that should be used for generation is not specified, the [cat-diffusion64x64ep5000](https://www.kaggle.com/models/danildolgov/cat-diffusion) model will be downloaded automatically.
 
 # Preview
 Results of the [cat-diffusion64x64ep5000](https://www.kaggle.com/models/danildolgov/cat-diffusion):<br>
