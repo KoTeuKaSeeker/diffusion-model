@@ -8,12 +8,18 @@
 ![Static Badge](https://img.shields.io/badge/Git-%23EA330E?style=for-the-badge&logo=git&logoColor=white)
 
 The project is a diffusion model written in [PyTorch](https://pytorch.org/) that can generate random images of cats. The model was written from scratch. Training took place on a dataset containing 9,971 images of cats of various sizes, each of which was then scaled to the required resolution. 
-All training was done on the Kaggle platform using the TPU accelerator. The training code is contained in the following notebook.
+All training was done on the [Kaggle](https://www.kaggle.com/) platform using the TPU accelerator. The training code is contained [here](https://www.kaggle.com/code/danildolgov/diffusion-model).
+
+The trained model is also available on [Kaggle](https://www.kaggle.com/):
+1. [Cat-diffusion | size 64x64 | epochs 5000](https://www.kaggle.com/models/danildolgov/cat-diffusion)
+2. Cat-diffusion | size 128x128 | epochs ? (coming soon...)
 
 # Running
-To try running the code, you need to download the project and run the python file <b>dialog_demo.py</b>. The models will download themselves if it is discovered that they are not in the project.
+To generate cat images using the cat-diffusion model, you need to download the [git project](https://github.com/KoTeuKaSeeker/diffusion-model/archive/refs/heads/master.zip) and run the <b>inference.ipynb</b> notebook.
 
 # Preview
+
+
 Here is a demonstration of what a dialogue with a model will look like and what responses it gives.
 ![model preview](https://github.com/KoTeuKaSeeker/DialogLLM/blob/main/assets/dialogllm_preview.gif)
 
